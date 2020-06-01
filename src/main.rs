@@ -1,0 +1,171 @@
+//! Records a WAV file (roughly 3 seconds long) using the default input device and format.
+//!
+//! The input data is recorded to "$CARGO_MANIFEST_DIR/recorded.wav".
+
+extern crate cpal;
+extern crate hound;
+extern crate serde;
+extern crate serde_json;
+
+use std::io::{self, BufRead};
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::time::{Instant};
+
+use cpal::traits::{DeviceTrait, EventLoopTrait, HostTrait};
+
+use serde::{Serialize};
+
+use serde_json::{Value};
+
+#[derive(Serialize)]
+struct TimeResponse<'a> {
+    id: &'a Value,
+    response: u128,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let path = &args[1];
+
+    // Use the default host for working with audio devices.
+    let host = cpal::default_host();
+
+    // Setup the default input device and stream with the default input format.
+    let device = host
+        .default_input_device()
+        .expect("Failed to get default input device");
+    println!("Default input device: {}", device.name()?);
+    let format = device
+        .default_input_format()
+        .expect("Failed to get default input format");
+    println!("Default input format: {:?}", format);
+
+    let (recording, writer) = record(path, host, device, format)?;
+
+    let start_time = Instant::now();
+
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let line = line.unwrap();
+        let request_json: Value = serde_json::from_str(line.as_str())?;
+        let response = match request_json["method"].as_str() {
+            Some("get_time") => {
+                let res = TimeResponse {
+                    id: &request_json["id"],
+                    response: start_time.elapsed().as_millis(),
+                };
+                serde_json::to_string(&res)?
+            },
+            Some("stop") => break,
+            Some(_) => continue,
+            None => continue,
+        };
+        println!("{}", response);
+    }
+
+    recording.store(false, std::sync::atomic::Ordering::Relaxed);
+    writer.lock().unwrap().take().unwrap().finalize()?;
+    println!("Recording complete!");
+    Ok(())
+}
+
+fn record(
+    path: &str,
+    host: cpal::Host,
+    device: cpal::Device,
+    format: cpal::Format,
+) -> Result<
+    (
+        Arc<AtomicBool>,
+        Arc<Mutex<Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let event_loop = host.event_loop();
+    let stream_id = event_loop.build_input_stream(&device, &format)?;
+    event_loop.play_stream(stream_id)?;
+
+    let spec = wav_spec_from_format(&format);
+    let writer = hound::WavWriter::create(path, spec)?;
+    let writer = Arc::new(Mutex::new(Some(writer)));
+
+    // A flag to indicate that recording is in progress.
+    println!("Begin recording...");
+    let recording = Arc::new(AtomicBool::new(true));
+
+    // Run the input stream on a separate thread.
+    let writer_2 = writer.clone();
+    let recording_2 = recording.clone();
+    std::thread::spawn(move || {
+        event_loop.run(move |id, event| {
+            let data = match event {
+                Ok(data) => data,
+                Err(err) => {
+                    eprintln!("an error occurred on stream {:?}: {}", id, err);
+                    return;
+                }
+            };
+
+            // If we're done recording, return early.
+            if !recording_2.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            // Otherwise write to the wav writer.
+            match data {
+                cpal::StreamData::Input {
+                    buffer: cpal::UnknownTypeInputBuffer::U16(buffer),
+                } => {
+                    if let Ok(mut guard) = writer_2.try_lock() {
+                        if let Some(writer) = guard.as_mut() {
+                            for sample in buffer.iter() {
+                                let sample = cpal::Sample::to_i16(sample);
+                                writer.write_sample(sample).ok();
+                            }
+                        }
+                    }
+                }
+                cpal::StreamData::Input {
+                    buffer: cpal::UnknownTypeInputBuffer::I16(buffer),
+                } => {
+                    if let Ok(mut guard) = writer_2.try_lock() {
+                        if let Some(writer) = guard.as_mut() {
+                            for &sample in buffer.iter() {
+                                writer.write_sample(sample).ok();
+                            }
+                        }
+                    }
+                }
+                cpal::StreamData::Input {
+                    buffer: cpal::UnknownTypeInputBuffer::F32(buffer),
+                } => {
+                    if let Ok(mut guard) = writer_2.try_lock() {
+                        if let Some(writer) = guard.as_mut() {
+                            for &sample in buffer.iter() {
+                                writer.write_sample(sample).ok();
+                            }
+                        }
+                    }
+                }
+                _ => (),
+            }
+        });
+    });
+    Ok((recording, writer))
+}
+
+fn sample_format(format: cpal::SampleFormat) -> hound::SampleFormat {
+    match format {
+        cpal::SampleFormat::U16 => hound::SampleFormat::Int,
+        cpal::SampleFormat::I16 => hound::SampleFormat::Int,
+        cpal::SampleFormat::F32 => hound::SampleFormat::Float,
+    }
+}
+
+fn wav_spec_from_format(format: &cpal::Format) -> hound::WavSpec {
+    hound::WavSpec {
+        channels: format.channels as _,
+        sample_rate: format.sample_rate.0 as _,
+        bits_per_sample: (format.data_type.sample_size() * 8) as _,
+        sample_format: sample_format(format.data_type),
+    }
+}
