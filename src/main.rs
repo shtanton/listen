@@ -34,11 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = host
         .default_input_device()
         .expect("Failed to get default input device");
-    println!("Default input device: {}", device.name()?);
     let format = device
         .default_input_format()
         .expect("Failed to get default input format");
-    println!("Default input format: {:?}", format);
 
     let (recording, writer) = record(path, host, device, format)?;
 
@@ -49,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let line = line.unwrap();
         let request_json: Value = serde_json::from_str(line.as_str())?;
         let response = match request_json["method"].as_str() {
-            Some("get_time") => {
+            Some("get_status") => {
                 let res = TimeResponse {
                     id: &request_json["id"],
                     response: start_time.elapsed().as_millis(),
@@ -65,7 +63,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     recording.store(false, std::sync::atomic::Ordering::Relaxed);
     writer.lock().unwrap().take().unwrap().finalize()?;
-    println!("Recording complete!");
     Ok(())
 }
 
@@ -89,11 +86,8 @@ fn record(
     let writer = hound::WavWriter::create(path, spec)?;
     let writer = Arc::new(Mutex::new(Some(writer)));
 
-    // A flag to indicate that recording is in progress.
-    println!("Begin recording...");
     let recording = Arc::new(AtomicBool::new(true));
 
-    // Run the input stream on a separate thread.
     let writer_2 = writer.clone();
     let recording_2 = recording.clone();
     std::thread::spawn(move || {
