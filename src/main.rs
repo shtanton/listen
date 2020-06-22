@@ -1,11 +1,5 @@
-//! Records a WAV file (roughly 3 seconds long) using the default input device and format.
-//!
-//! The input data is recorded to "$CARGO_MANIFEST_DIR/recorded.wav".
-
 extern crate cpal;
 extern crate hound;
-extern crate serde;
-extern crate serde_json;
 
 use std::io::{self, BufRead};
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
@@ -13,24 +7,12 @@ use std::time::{Instant};
 
 use cpal::traits::{DeviceTrait, EventLoopTrait, HostTrait};
 
-use serde::{Serialize};
-
-use serde_json::{Value};
-
-#[derive(Serialize)]
-struct TimeResponse<'a> {
-    id: &'a Value,
-    response: u128,
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let path = &args[1];
 
-    // Use the default host for working with audio devices.
     let host = cpal::default_host();
-
-    // Setup the default input device and stream with the default input format.
     let device = host
         .default_input_device()
         .expect("Failed to get default input device");
@@ -45,18 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = line.unwrap();
-        let request_json: Value = serde_json::from_str(line.as_str())?;
-        let response = match request_json["method"].as_str() {
-            Some("get_status") => {
-                let res = TimeResponse {
-                    id: &request_json["id"],
-                    response: start_time.elapsed().as_millis(),
-                };
-                serde_json::to_string(&res)?
-            },
-            Some("stop") => break,
-            Some(_) => continue,
-            None => continue,
+        let response = match line.as_str() {
+            "time" => start_time.elapsed().as_millis().to_string(),
+            "stop" => break,
+            _ => continue,
         };
         println!("{}", response);
     }
