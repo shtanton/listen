@@ -2,6 +2,10 @@ extern crate cpal;
 extern crate futures;
 extern crate hound;
 extern crate iced;
+extern crate iced_native;
+extern crate iced_wgpu;
+
+mod volume;
 
 use std::io::{self, BufRead};
 use std::sync::{
@@ -22,7 +26,9 @@ use iced::futures::{
     stream::{BoxStream, StreamExt},
 };
 
-use iced::{executor, Application, Column, Command, Element, Settings, Subscription, Text};
+use iced::{executor, Application, Column, Command, Element, Length, Settings, Subscription, Text};
+
+use volume::Volume;
 
 #[derive(Debug)]
 enum Message {
@@ -30,8 +36,7 @@ enum Message {
 }
 
 struct App {
-    pos_volume: usize,
-    neg_volume: usize,
+    volume: f32,
     host: Arc<cpal::Host>,
     device: Arc<cpal::Device>,
     format: Arc<cpal::Format>,
@@ -54,8 +59,7 @@ impl Application for App {
 
         (
             App {
-                pos_volume: 0,
-                neg_volume: 0,
+                volume: 0.,
                 host: Arc::new(host),
                 device: Arc::new(device),
                 format: Arc::new(format),
@@ -72,31 +76,14 @@ impl Application for App {
     fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
         match message {
             Message::Sample(sample) => {
-                println!("{}", sample);
-                if sample > 0. {
-                    self.pos_volume = (sample * 20.) as usize;
-                } else if sample < 0. {
-                    self.neg_volume = (-sample * 20.) as usize;
-                } else {
-                    self.pos_volume = 0;
-                    self.neg_volume = 0;
-                }
+                self.volume = sample;
                 Command::none()
             }
         }
     }
 
     fn view(&mut self) -> Element<Self::Message> {
-        Column::new()
-            .push(Text::new(format!(
-                "Pos volume: {:#<1$}",
-                "", self.pos_volume
-            )))
-            .push(Text::new(format!(
-                "Neg volume: {:#<1$}",
-                "", self.neg_volume
-            )))
-            .into()
+        Volume::new(self.volume).into()
     }
 
     fn subscription(&self) -> Subscription<Message> {

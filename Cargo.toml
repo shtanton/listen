@@ -11,6 +11,7 @@ cpal = "0.11.0"
 hound = "3.4.0"
 iced = "0.1.1"
 iced_native = "0.2.2"
+iced_wgpu = "0.2.3"
 
 [dependencies.futures]
 version = "0.3.5"
