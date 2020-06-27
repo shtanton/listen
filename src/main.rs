@@ -40,7 +40,6 @@ struct App {
     host: Arc<cpal::Host>,
     device: Arc<cpal::Device>,
     format: Arc<cpal::Format>,
-    recording: Arc<AtomicBool>,
 }
 
 impl Application for App {
@@ -63,7 +62,6 @@ impl Application for App {
                 host: Arc::new(host),
                 device: Arc::new(device),
                 format: Arc::new(format),
-                recording: Arc::new(AtomicBool::new(true)),
             },
             Command::none(),
         )
@@ -83,7 +81,10 @@ impl Application for App {
     }
 
     fn view(&mut self) -> Element<Self::Message> {
-        Volume::new(self.volume).into()
+        Column::new()
+            .push(Text::new("Hello"))
+            .push(Volume::new(self.volume).width(Length::Units(200)))
+            .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -91,7 +92,6 @@ impl Application for App {
             self.host.clone(),
             self.device.clone(),
             self.format.clone(),
-            self.recording.clone(),
         )
         .map(Message::Sample)
     }
@@ -105,13 +105,11 @@ fn audio_subscription(
     host: Arc<cpal::Host>,
     device: Arc<cpal::Device>,
     format: Arc<cpal::Format>,
-    recording: Arc<AtomicBool>,
 ) -> iced::Subscription<f32> {
     iced::Subscription::from_recipe(AudioIn {
         host,
         device,
         format,
-        recording,
     })
 }
 
@@ -119,7 +117,6 @@ struct AudioIn {
     host: Arc<cpal::Host>,
     device: Arc<cpal::Device>,
     format: Arc<cpal::Format>,
-    recording: Arc<AtomicBool>,
 }
 
 impl<H, I> iced_native::subscription::Recipe<H, I> for AudioIn
@@ -139,7 +136,6 @@ where
                 &self.host,
                 &self.device,
                 &self.format,
-                self.recording.clone(),
             )
             .unwrap()
             .scan((Instant::now(), 0.), |(started, largest), sample| {
@@ -173,7 +169,7 @@ pub fn do_record() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to get default input format");
 
     let recording = Arc::new(AtomicBool::new(true));
-    let samples = record(&host, &device, &format, recording.clone())?;
+    let samples = record(&host, &device, &format)?;
 
     let mut writer = hound::WavWriter::create(path, wav_spec_from_format(&format))?;
 
@@ -214,7 +210,6 @@ fn record(
     host: &cpal::Host,
     device: &cpal::Device,
     format: &cpal::Format,
-    recording: Arc<AtomicBool>,
 ) -> Result<Receiver<f32>, Box<dyn std::error::Error>> {
     let event_loop = host.event_loop();
     let stream_id = event_loop.build_input_stream(&device, format)?;
@@ -232,8 +227,7 @@ fn record(
                 }
             };
 
-            if !recording.load(Ordering::Relaxed) {
-                sender.close_channel();
+            if sender.is_closed() {
                 return;
             }
 
