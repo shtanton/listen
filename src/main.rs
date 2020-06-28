@@ -6,13 +6,12 @@ extern crate iced_native;
 extern crate iced_wgpu;
 
 mod volume;
+mod time;
 
-use std::io::{self, BufRead};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cpal::{
     traits::{DeviceTrait, EventLoopTrait, HostTrait},
@@ -21,33 +20,43 @@ use cpal::{
 
 use iced::futures::{
     channel::mpsc::{channel, Receiver},
-    executor::ThreadPool,
-    future,
-    stream::{BoxStream, StreamExt},
+    stream::BoxStream,
 };
 
-use iced::{executor, Application, Column, Command, Element, Length, Settings, Subscription, Text};
+use iced::{executor, Application, Button, button, Column, Command, Element, Length, Settings, Subscription, Text};
 
 use volume::Volume;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Message {
-    Sample(f32),
+    Buffer(Vec<f32>),
+    NextRecordStatus,
+    UpdateVolume,
+}
+
+enum RecordStatus {
+    NotStarted,
+    Recording(hound::WavWriter<std::io::BufWriter<std::fs::File>>),
+    Finished,
 }
 
 struct App {
     volume: f32,
+    max_volume: f32,
     host: Arc<cpal::Host>,
     device: Arc<cpal::Device>,
     format: Arc<cpal::Format>,
+    button: button::State,
+    recording: RecordStatus,
+    path: String,
 }
 
 impl Application for App {
     type Executor = executor::Default;
     type Message = Message;
-    type Flags = ();
+    type Flags = String;
 
-    fn new(_flags: Self::Flags) -> (App, Command<Self::Message>) {
+    fn new(flags: Self::Flags) -> (App, Command<Self::Message>) {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -59,9 +68,13 @@ impl Application for App {
         (
             App {
                 volume: 0.,
+                max_volume: 0.,
                 host: Arc::new(host),
                 device: Arc::new(device),
                 format: Arc::new(format),
+                button: button::State::new(),
+                recording: RecordStatus::NotStarted,
+                path: flags,
             },
             Command::none(),
         )
@@ -73,8 +86,35 @@ impl Application for App {
 
     fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
         match message {
-            Message::Sample(sample) => {
-                self.volume = sample;
+            Message::Buffer(buffer) => {
+                for sample in buffer.into_iter() {
+                    self.max_volume = self.max_volume.max(sample);
+                    if let RecordStatus::Recording(writer) = &mut self.recording {
+                        writer.write_sample(sample).ok();
+                    }
+                }
+                Command::none()
+            }
+            Message::NextRecordStatus => {
+                use RecordStatus::*;
+                match &self.recording {
+                    NotStarted => {
+                        self.recording = Recording(hound::WavWriter::create(&self.path, wav_spec_from_format(&self.format)).unwrap());
+                    }
+                    Recording(_) => {
+                        if let Recording(writer) = std::mem::replace(&mut self.recording, Finished) {
+                            writer.finalize().unwrap();
+                        }
+                    },
+                    Finished => {
+                        self.recording = Finished;
+                    }
+                };
+                Command::none()
+            }
+            Message::UpdateVolume => {
+                self.volume = self.max_volume.min(1.);
+                self.max_volume = 0.;
                 Command::none()
             }
         }
@@ -82,30 +122,42 @@ impl Application for App {
 
     fn view(&mut self) -> Element<Self::Message> {
         Column::new()
-            .push(Text::new("Hello"))
+            .spacing(30)
+            .padding(30)
+            .push(match self.recording {
+                RecordStatus::Finished => Button::new(&mut self.button, Text::new("Finished Recording")),
+                RecordStatus::Recording(_) => Button::new(&mut self.button, Text::new("Stop Recording")).on_press(Message::NextRecordStatus),
+                RecordStatus::NotStarted => Button::new(&mut self.button, Text::new("Record")).on_press(Message::NextRecordStatus),
+            })
             .push(Volume::new(self.volume).width(Length::Units(200)))
             .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        Subscription::batch(vec![
         audio_subscription(
             self.host.clone(),
             self.device.clone(),
             self.format.clone(),
         )
-        .map(Message::Sample)
+        .map(Message::Buffer),
+        time::every(Duration::from_millis(33)).map(|()| Message::UpdateVolume),
+        ])
     }
 }
 
 pub fn main() {
-    App::run(Settings::default());
+    let args: Vec<String> = std::env::args().collect();
+    let path = args[1].clone();
+
+    App::run(Settings::with_flags(path));
 }
 
 fn audio_subscription(
     host: Arc<cpal::Host>,
     device: Arc<cpal::Device>,
     format: Arc<cpal::Format>,
-) -> iced::Subscription<f32> {
+) -> iced::Subscription<Vec<f32>> {
     iced::Subscription::from_recipe(AudioIn {
         host,
         device,
@@ -123,7 +175,7 @@ impl<H, I> iced_native::subscription::Recipe<H, I> for AudioIn
 where
     H: std::hash::Hasher,
 {
-    type Output = f32;
+    type Output = Vec<f32>;
 
     fn hash(&self, state: &mut H) {
         use std::hash::Hash;
@@ -137,85 +189,21 @@ where
                 &self.device,
                 &self.format,
             )
-            .unwrap()
-            .scan((Instant::now(), 0.), |(started, largest), sample| {
-                let so_far = sample.max(*largest);
-                future::ready(if started.elapsed() > Duration::from_millis(33) {
-                    *started += Duration::from_millis(33);
-                    *largest = 0.;
-                    Some((true, so_far))
-                } else {
-                    *largest = so_far;
-                    Some((false, so_far))
-                })
-            })
-            .filter_map(|(important, v)| {
-                future::ready(if important { Some(v.min(1.)) } else { None })
-            }),
+            .unwrap(),
         )
     }
-}
-
-pub fn do_record() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    let path = &args[1];
-
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .expect("Failed to get default input device");
-    let format = device
-        .default_input_format()
-        .expect("Failed to get default input format");
-
-    let recording = Arc::new(AtomicBool::new(true));
-    let samples = record(&host, &device, &format)?;
-
-    let mut writer = hound::WavWriter::create(path, wav_spec_from_format(&format))?;
-
-    let recording_task = async {
-        samples
-            .for_each(|sample| {
-                writer.write_sample(sample).ok();
-                if sample > 0. {
-                    println!("Sample: {:#<1$}", "", (sample * 20.) as usize);
-                }
-                async {}
-            })
-            .await;
-        writer.finalize().unwrap();
-    };
-
-    let pool = ThreadPool::new().unwrap();
-    pool.spawn_ok(recording_task);
-
-    let start_time = Instant::now();
-
-    let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let line = line.unwrap();
-        let response = match line.as_str() {
-            "time" => start_time.elapsed().as_millis().to_string(),
-            "stop" => break,
-            _ => continue,
-        };
-        println!("{}", response);
-    }
-    recording.store(false, Ordering::Relaxed);
-
-    Ok(())
 }
 
 fn record(
     host: &cpal::Host,
     device: &cpal::Device,
     format: &cpal::Format,
-) -> Result<Receiver<f32>, Box<dyn std::error::Error>> {
+) -> Result<Receiver<Vec<f32>>, Box<dyn std::error::Error>> {
     let event_loop = host.event_loop();
     let stream_id = event_loop.build_input_stream(&device, format)?;
     event_loop.play_stream(stream_id)?;
 
-    let (mut sender, receiver) = channel(1024);
+    let (mut sender, receiver) = channel(256);
 
     std::thread::spawn(move || {
         event_loop.run(move |id, event| {
@@ -235,23 +223,17 @@ fn record(
                 cpal::StreamData::Input {
                     buffer: cpal::UnknownTypeInputBuffer::U16(buffer),
                 } => {
-                    for sample in buffer.iter() {
-                        sender.try_send(sample.to_f32()).unwrap();
-                    }
+                    sender.try_send(buffer.iter().map(|s| s.to_f32()).collect()).ok();
                 }
                 cpal::StreamData::Input {
                     buffer: cpal::UnknownTypeInputBuffer::I16(buffer),
                 } => {
-                    for &sample in buffer.iter() {
-                        sender.try_send(sample.to_f32()).unwrap();
-                    }
+                    sender.try_send(buffer.iter().map(|s| s.to_f32()).collect()).ok();
                 }
                 cpal::StreamData::Input {
                     buffer: cpal::UnknownTypeInputBuffer::F32(buffer),
                 } => {
-                    for &sample in buffer.iter() {
-                        sender.try_send(sample).unwrap();
-                    }
+                    sender.try_send(buffer.iter().map(|s| *s).collect()).ok();
                 }
                 _ => (),
             }
