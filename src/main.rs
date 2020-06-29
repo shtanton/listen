@@ -5,13 +5,12 @@ extern crate iced;
 extern crate iced_native;
 extern crate iced_wgpu;
 
-mod volume;
+mod rpc;
 mod time;
+mod volume;
 
-use std::sync::{
-    Arc,
-};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cpal::{
     traits::{DeviceTrait, EventLoopTrait, HostTrait},
@@ -23,8 +22,12 @@ use iced::futures::{
     stream::BoxStream,
 };
 
-use iced::{executor, Application, Button, button, Column, Command, Element, Length, Settings, Subscription, Text};
+use iced::{
+    button, executor, Application, Button, Column, Command, Element, Length, Settings,
+    Subscription, Text,
+};
 
+use rpc::Rpc;
 use volume::Volume;
 
 #[derive(Debug, Clone)]
@@ -32,11 +35,12 @@ enum Message {
     Buffer(Vec<f32>),
     NextRecordStatus,
     UpdateVolume,
+    RpcMessage(rpc::Receive),
 }
 
 enum RecordStatus {
     NotStarted,
-    Recording(hound::WavWriter<std::io::BufWriter<std::fs::File>>),
+    Recording(Instant, hound::WavWriter<std::io::BufWriter<std::fs::File>>),
     Finished,
 }
 
@@ -49,6 +53,7 @@ struct App {
     button: button::State,
     recording: RecordStatus,
     path: String,
+    rpc: Rpc,
 }
 
 impl Application for App {
@@ -75,6 +80,7 @@ impl Application for App {
                 button: button::State::new(),
                 recording: RecordStatus::NotStarted,
                 path: flags,
+                rpc: Rpc::new(),
             },
             Command::none(),
         )
@@ -89,7 +95,7 @@ impl Application for App {
             Message::Buffer(buffer) => {
                 for sample in buffer.into_iter() {
                     self.max_volume = self.max_volume.max(sample);
-                    if let RecordStatus::Recording(writer) = &mut self.recording {
+                    if let RecordStatus::Recording(_, writer) = &mut self.recording {
                         writer.write_sample(sample).ok();
                     }
                 }
@@ -99,13 +105,22 @@ impl Application for App {
                 use RecordStatus::*;
                 match &self.recording {
                     NotStarted => {
-                        self.recording = Recording(hound::WavWriter::create(&self.path, wav_spec_from_format(&self.format)).unwrap());
+                        self.recording = Recording(
+                            Instant::now(),
+                            hound::WavWriter::create(
+                                &self.path,
+                                wav_spec_from_format(&self.format),
+                            )
+                            .unwrap(),
+                        );
                     }
-                    Recording(_) => {
-                        if let Recording(writer) = std::mem::replace(&mut self.recording, Finished) {
+                    Recording(_, _) => {
+                        if let Recording(_, writer) =
+                            std::mem::replace(&mut self.recording, Finished)
+                        {
                             writer.finalize().unwrap();
                         }
-                    },
+                    }
                     Finished => {
                         self.recording = Finished;
                     }
@@ -117,6 +132,14 @@ impl Application for App {
                 self.max_volume = 0.;
                 Command::none()
             }
+            Message::RpcMessage(rpc::Receive::Time) => {
+                if let RecordStatus::Recording(started, _) = self.recording {
+                    self.rpc.send(started.elapsed().as_millis());
+                } else {
+                    self.rpc.send("null");
+                }
+                Command::none()
+            }
         }
     }
 
@@ -125,9 +148,15 @@ impl Application for App {
             .spacing(30)
             .padding(30)
             .push(match self.recording {
-                RecordStatus::Finished => Button::new(&mut self.button, Text::new("Finished Recording")),
-                RecordStatus::Recording(_) => Button::new(&mut self.button, Text::new("Stop Recording")).on_press(Message::NextRecordStatus),
-                RecordStatus::NotStarted => Button::new(&mut self.button, Text::new("Record")).on_press(Message::NextRecordStatus),
+                RecordStatus::Finished => {
+                    Button::new(&mut self.button, Text::new("Finished Recording"))
+                }
+                RecordStatus::Recording(_, _) => {
+                    Button::new(&mut self.button, Text::new("Stop Recording"))
+                        .on_press(Message::NextRecordStatus)
+                }
+                RecordStatus::NotStarted => Button::new(&mut self.button, Text::new("Record"))
+                    .on_press(Message::NextRecordStatus),
             })
             .push(Volume::new(self.volume).width(Length::Units(200)))
             .into()
@@ -135,13 +164,10 @@ impl Application for App {
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch(vec![
-        audio_subscription(
-            self.host.clone(),
-            self.device.clone(),
-            self.format.clone(),
-        )
-        .map(Message::Buffer),
-        time::every(Duration::from_millis(33)).map(|()| Message::UpdateVolume),
+            audio_subscription(self.host.clone(), self.device.clone(), self.format.clone())
+                .map(Message::Buffer),
+            time::every(Duration::from_millis(33)).map(|()| Message::UpdateVolume),
+            self.rpc.receive().map(Message::RpcMessage),
         ])
     }
 }
@@ -183,14 +209,7 @@ where
     }
 
     fn stream(self: Box<Self>, _input: BoxStream<'static, I>) -> BoxStream<'static, Self::Output> {
-        Box::pin(
-            record(
-                &self.host,
-                &self.device,
-                &self.format,
-            )
-            .unwrap(),
-        )
+        Box::pin(record(&self.host, &self.device, &self.format).unwrap())
     }
 }
 
@@ -223,12 +242,16 @@ fn record(
                 cpal::StreamData::Input {
                     buffer: cpal::UnknownTypeInputBuffer::U16(buffer),
                 } => {
-                    sender.try_send(buffer.iter().map(|s| s.to_f32()).collect()).ok();
+                    sender
+                        .try_send(buffer.iter().map(|s| s.to_f32()).collect())
+                        .ok();
                 }
                 cpal::StreamData::Input {
                     buffer: cpal::UnknownTypeInputBuffer::I16(buffer),
                 } => {
-                    sender.try_send(buffer.iter().map(|s| s.to_f32()).collect()).ok();
+                    sender
+                        .try_send(buffer.iter().map(|s| s.to_f32()).collect())
+                        .ok();
                 }
                 cpal::StreamData::Input {
                     buffer: cpal::UnknownTypeInputBuffer::F32(buffer),

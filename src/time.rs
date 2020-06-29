@@ -1,9 +1,7 @@
 use iced::futures::{self, StreamExt};
 use std::time::Instant;
 
-pub fn every(
-    duration: std::time::Duration,
-) -> iced::Subscription<()> {
+pub fn every(duration: std::time::Duration) -> iced::Subscription<()> {
     iced::Subscription::from_recipe(Every(duration))
 }
 
@@ -33,6 +31,6 @@ where
             std::thread::sleep(remaining);
             Some(((), state + duration))
         })
-            .boxed()
+        .boxed()
     }
 }
