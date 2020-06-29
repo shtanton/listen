@@ -46,7 +46,7 @@ impl<Message> Widget<Message, Renderer> for Volume {
         _cursor_position: Point,
     ) -> (Primitive, MouseCursor) {
         let bounds = layout.bounds();
-        let inner_height = self.volume * bounds.height;
+        let inner_height = (self.volume * 0.5).min(1.) * (bounds.height - 4.);
         (
             Primitive::Group {
                 primitives: vec![
@@ -64,7 +64,11 @@ impl<Message> Widget<Message, Renderer> for Volume {
                             x: bounds.x + 2.,
                             width: bounds.width - 4.,
                         },
-                        background: Background::Color(Color::from_rgb(1., 0., 0.)),
+                        background: Background::Color(Color::from_rgb(
+                            self.volume.min(1.).max(0.),
+                            1. - self.volume.min(1.).max(0.),
+                            0.,
+                        )),
                         border_radius: 0,
                         border_width: 0,
                         border_color: Color::TRANSPARENT,

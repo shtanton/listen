@@ -128,7 +128,7 @@ impl Application for App {
                 Command::none()
             }
             Message::UpdateVolume => {
-                self.volume = self.max_volume.min(1.);
+                self.volume = self.max_volume;
                 self.max_volume = 0.;
                 Command::none()
             }
