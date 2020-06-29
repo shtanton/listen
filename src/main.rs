@@ -144,22 +144,25 @@ impl Application for App {
     }
 
     fn view(&mut self) -> Element<Self::Message> {
-        Column::new()
-            .spacing(30)
-            .padding(30)
-            .push(match self.recording {
-                RecordStatus::Finished => {
-                    Button::new(&mut self.button, Text::new("Finished Recording"))
-                }
-                RecordStatus::Recording(_, _) => {
+        let col = Column::new().spacing(30).padding(30);
+        match self.recording {
+            RecordStatus::Finished => col.push(Button::new(
+                &mut self.button,
+                Text::new("Finished Recording"),
+            )),
+            RecordStatus::Recording(start_time, _) => col
+                .push(
                     Button::new(&mut self.button, Text::new("Stop Recording"))
-                        .on_press(Message::NextRecordStatus)
-                }
-                RecordStatus::NotStarted => Button::new(&mut self.button, Text::new("Record"))
+                        .on_press(Message::NextRecordStatus),
+                )
+                .push(Text::new(display_duration(start_time.elapsed()))),
+            RecordStatus::NotStarted => col.push(
+                Button::new(&mut self.button, Text::new("Record"))
                     .on_press(Message::NextRecordStatus),
-            })
-            .push(Volume::new(self.volume).width(Length::Units(200)))
-            .into()
+            ),
+        }
+        .push(Volume::new(self.volume).width(Length::Units(200)))
+        .into()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -177,6 +180,15 @@ pub fn main() {
     let path = args[1].clone();
 
     App::run(Settings::with_flags(path));
+}
+
+pub fn display_duration<'a>(time: Duration) -> String {
+    let seconds = time.as_secs();
+    let sub_seconds = seconds % 60;
+    let minutes = seconds / 60;
+    let sub_minutes = minutes % 60;
+    let hours = minutes / 60;
+    return format!("{:02}:{:02}:{:02}", hours, sub_minutes, sub_seconds);
 }
 
 fn audio_subscription(
