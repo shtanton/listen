@@ -23,7 +23,7 @@ use iced::futures::{
 };
 
 use iced::{
-    button, executor, Application, Button, Column, Command, Element, Length, Settings,
+    button, executor, Align, Application, Button, Column, Command, Element, Length, Settings,
     Subscription, Text,
 };
 
@@ -144,7 +144,7 @@ impl Application for App {
     }
 
     fn view(&mut self) -> Element<Self::Message> {
-        let col = Column::new().spacing(30).padding(30);
+        let col = Column::new().align_items(Align::Center).width(Length::Fill).spacing(30).padding(30);
         match self.recording {
             RecordStatus::Finished => col.push(Button::new(
                 &mut self.button,
